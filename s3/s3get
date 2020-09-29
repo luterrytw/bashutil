@@ -1,0 +1,89 @@
+#/bin/bash 
+
+function hmac_sha256 {
+	key="$1"
+	data="$2"
+	echo -n "$data" | openssl dgst -sha256 -mac HMAC -macopt "$key" | sed 's/^.* //'
+}
+
+FILE=deploytest-v1.0.5-3bbaacc2a3e5b04d399cee8f75bc275a.zip
+FILE_PATH=1
+BUCKET=adv-ota-stg-580071610
+KEY=${FILE_PATH}/${FILE}
+
+S3SECRET=
+S3KEY=
+REGION=ap-southeast-1
+HOST=s3.${REGION}.amazonaws.com
+DATETIME=$(date -u +'%Y%m%dT%H%M%SZ')
+DATE=$(echo ${DATETIME} | sed 's/T.*//')
+SERVICE=s3
+ALGORITHM=AWS4-HMAC-SHA256
+EMPTY_SHA256SUM=`sha256sum -t << EOF
+EOF`
+EMPTY_SHA256SUM=$(echo ${EMPTY_SHA256SUM} | awk '{print $1}')
+
+
+# for CANONICAL_REQ
+HTTPMethod="GET"
+if [[ ${KEY} != "" ]]; then
+	CanonicalURI="/${BUCKET}/${KEY}"
+else
+	CanonicalURI="/${BUCKET}"
+fi
+CanonicalQueryString=""
+CanonicalHeaders="host:${HOST}\nx-amz-content-sha256:${EMPTY_SHA256SUM}\nx-amz-date:${DATETIME}\n"
+SignedHeaders="host;x-amz-content-sha256;x-amz-date"
+HashedPayload="${EMPTY_SHA256SUM}"
+
+CANONICAL_REQ="${HTTPMethod}\n\
+${CanonicalURI}\n\
+${CanonicalQueryString}\n\
+${CanonicalHeaders}\n\
+${SignedHeaders}\n\
+${HashedPayload}\
+"
+
+echo "-----CANONICAL_REQ---------------------------------"
+echo -e "${CANONICAL_REQ}"
+echo -en ${CANONICAL_REQ} > CANONICAL_REQ
+
+# for STRING_TO_SIGN
+Scope="${DATE}/${REGION}/${SERVICE}/aws4_request"
+CanonicalRequestHash=`openssl dgst -sha256 CANONICAL_REQ | awk '{print $2}'`
+STRING_TO_SIGN="${ALGORITHM}\n\
+${DATETIME}\n\
+${Scope}\n\
+${CanonicalRequestHash}\
+"
+echo "-----STRING_TO_SIGN---------------------------------"
+echo -e "${STRING_TO_SIGN}"
+echo -en ${STRING_TO_SIGN} > STRING_TO_SIGN
+
+dateKey=$(hmac_sha256 key:"AWS4${S3SECRET}" ${DATE})
+dateRegionKey=$(hmac_sha256 hexkey:${dateKey} ${REGION})
+dateRegionServiceKey=$(hmac_sha256 hexkey:${dateRegionKey} ${SERVICE})
+signingKey=$(hmac_sha256 hexkey:$dateRegionServiceKey "aws4_request")
+echo "-----signingKey---------------------------------"
+echo -e "${signingKey}"
+
+
+Signature=`openssl dgst -sha256 -mac HMAC -macopt hexkey:${signingKey} STRING_TO_SIGN | awk '{print $2}'`
+echo "-----Signature---------------------------------"
+echo -e "${Signature}"
+
+Authorization="Authorization: ${ALGORITHM} Credential=${S3KEY}/${Scope}, SignedHeaders=${SignedHeaders}, Signature=${Signature}"
+echo "-----Authorization---------------------------------"
+echo -e "${Authorization}"
+
+echo "-----URL---------------------------------"
+echo -e "http://${HOST}${CanonicalURI}"
+
+curl -v https://${HOST}${CanonicalURI} \
+     -H "Authorization: ${ALGORITHM} \
+         Credential=${S3KEY}/${Scope}, \
+         SignedHeaders=${SignedHeaders}, \
+         Signature=${Signature}" \
+     -H "x-amz-content-sha256: ${EMPTY_SHA256SUM}" \
+     -H "x-amz-date: ${DATETIME}" \
+	 -o ${FILE}
